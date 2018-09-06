@@ -1,0 +1,28 @@
+cargo-features = ["edition"]
+
+[package]
+name = "olaf2"
+version = "0.1.0"
+authors = ["Sam Scott <sam.scott89@gmail.com>"]
+edition = '2018'
+
+[dependencies]
+env_logger = "0.5.13"
+base64 = "0.9.2"
+oauth2 = "2.0.0-alpha.2"
+rand = "0.5.5"
+url = "1.7.1"
+open = "1.2.2"
+actix-web = "0.7.5"
+reqwest = "0.8.8"
+serde = "1.0.76"
+serde_derive = "1.0.76"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
