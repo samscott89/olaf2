@@ -1,124 +1,106 @@
 #![feature(uniform_paths)]
 
-//!
-//! This example showcases the Github OAuth2 process for requesting access to the user's public repos and
-//! email address.
-//!
-//! Before running it, you'll need to generate your own Github OAuth2 credentials.
-//!
-//! In order to run the example call:
-//!
-//! ```sh
-//! GITHUB_CLIENT_ID=xxx GITHUB_CLIENT_SECRET=yyy cargo run --example github
-//! ```
-//!
-//! ...and follow the instructions.
-//!
-
-
-
-use oauth2::basic::BasicClient;
+use abscissa::{impl_global_config, logging, CanonicalPathBuf, GlobalConfig};
+use actix_web::{http, server, App, HttpResponse, Query, State};
+use lazy_static::lazy_static;
+use log::*;
+use oauth2::CsrfToken;
 use oauth2::prelude::*;
-use oauth2::{AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope,
-             TokenUrl};
-use std::env;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener};
+use serde_derive::Deserialize;
+use std::ops::Deref;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
 use url::Url;
 
-mod server;
+use olaf2::*;
 
-fn main() {
-    env_logger::init();
-    simulate_client("127.0.0.1:8080".parse().unwrap());
+/// Configuration data to parse from TOML
+#[derive(Clone, Deserialize, Debug)]
+pub struct Config {
+    /// Endpoint for the server.
+    #[serde(with="url_serde")]
+    pub server_url: Url,
 }
 
+impl_global_config!(Config, SERVER_CONFIG);
 
+fn main() {
+    let config = logging::LoggingConfig::default();
+    logging::init(config).expect("failed to start logging");
 
-pub fn simulate_client(addr: SocketAddr) {
-    let authorize_url = reqwest::get(&format!("http://{}/oauth-cli", addr)).unwrap().text().unwrap();
+    Config::set_global(Config { server_url: Url::parse("http://localhost:8081").unwrap() });
 
-    if open::that(authorize_url.to_string()).is_err() {
+    let token = CsrfToken::new_random();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let tx = Arc::new(tx);
+    let port = run_oauth_listener(Arc::new(token.clone()), tx);
+    let params = GenParams {
+        client_port: port,
+        csrf_token: token,
+    };
+    let url = get_authorization_url(&params);
+    info!("Recovered URL: {}", url);
+    if open::that(url.to_string()).is_err() {
         println!(
             "Open this URL in your browser:\n{}\n",
-            authorize_url.to_string()
+            url.to_string()
         );
     }
-    // A very naive implementation of the redirect server.
-    let listener = TcpListener::bind("127.0.0.1:31415").unwrap();
-    for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-            let code;
-            let state;
-            {
-                let mut reader = BufReader::new(&stream);
 
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line).unwrap();
+    let secret = rx.recv().unwrap();
+    info!("New secret received: {}", secret);
 
-                let redirect_url = request_line.split_whitespace().nth(1).unwrap();
-                let url = Url::parse(&("http://localhost".to_string() + redirect_url)).unwrap();
+}
 
-                let code_pair = url.query_pairs()
-                    .find(|pair| {
-                        let &(ref key, _) = pair;
-                        key == "code"
-                    })
-                    .unwrap();
+#[derive(Clone, Debug)]
+struct AppState {
+    nonce: Arc<CsrfToken>,
+    tx: Arc<mpsc::SyncSender<String>>,
+}
 
-                let (_, value) = code_pair;
-                code = AuthorizationCode::new(value.into_owned());
+pub fn run_oauth_listener(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> u16 {
+    let state = AppState { nonce, tx };
 
-                let state_pair = url.query_pairs()
-                    .find(|pair| {
-                        let &(ref key, _) = pair;
-                        key == "state"
-                    })
-                    .unwrap();
+    let server = server::new(move || {
+        App::with_state(state.clone()).resource("/", |r| r.with(handle_response))
+    })
+    .workers(1)
+    .bind("127.0.0.1:0")
+    .expect("Can not bind to 127.0.0.1:0");
+    let port = server.addrs().get(0).unwrap().port();
 
-                let (_, value) = state_pair;
-                state = CsrfToken::new(value.into_owned());
-            }
+    thread::spawn(move || {
+        let sys = actix::System::new("oauth_cli");  // <- create Actix system
+        server.start();
+        sys.run();  // <- Run actix system, this method starts all async processes
+    });
 
-            let message = "";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
-                message.len(),
-                message
-            );
-            stream.write_all(response.as_bytes()).unwrap();
+    port
+}
 
-            println!("Github returned the following code:\n{}\n", code.secret());
-            // println!(
-            //     "Github returned the following state:\n{} (expected `{}`)\n",
-            //     state.secret(),
-            //     csrf_state.secret()
-            // );
-
-            // // Exchange the code with a token.
-            // let token_res = client.exchange_code(code);
-
-            // println!("Github returned the following token:\n{:?}\n", token_res);
-
-            // if let Ok(token) = token_res {
-            //     // NB: Github returns a single comma-separated "scope" parameter instead of multiple
-            //     // space-separated scopes. Github-specific clients can parse this scope into
-            //     // multiple scopes by splitting at the commas. Note that it's not safe for the
-            //     // library to do this by default because RFC 6749 allows scopes to contain commas.
-            //     let scopes = if let Some(scopes_vec) = token.scopes() {
-            //         scopes_vec
-            //             .iter()
-            //             .map(|comma_separated| comma_separated.split(","))
-            //             .flat_map(|inner_scopes| inner_scopes)
-            //             .collect::<Vec<_>>()
-            //     } else {
-            //         Vec::new()
-            //     };
-            //     println!("Github returned the following scopes:\n{:?}\n", scopes);
-            // }
-
-            // The server will terminate itself after collecting the first code.
-            break;
-        }
+fn handle_response((info, state): (Query<FinResponse>, State<AppState>)) -> HttpResponse {
+    info!("Info: {:#?}", info);
+    let FinResponse { csrf_token, new_secret} = info.into_inner();
+    info!("Received nonce: {}, Expected nonce: {}", csrf_token.secret(), state.nonce.secret());
+    info!("new_secret: {}", new_secret);
+    if &csrf_token == state.nonce.deref() {
+        state.tx.send(new_secret).unwrap();
+    } else {
+        state.tx.send("".to_string()).unwrap();
     }
+    HttpResponse::Ok()
+        .connection_type(http::ConnectionType::Close) // <- Close connection
+        .force_close()                                // <- Alternative method
+        .finish()
+}
+
+pub fn get_authorization_url(params: &GenParams) -> String {
+    let server_url = &Config::get_global().server_url;
+    let client = reqwest::Client::new();
+    let resp = client.post(&format!("{}oauth-cli/start", server_url))
+                     .json(params)
+                     .send(); 
+    info!("Response: {:#?}", resp);
+    resp.unwrap().text().unwrap()
 }
