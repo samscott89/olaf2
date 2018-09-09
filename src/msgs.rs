@@ -1,8 +1,10 @@
-use oauth2::prelude::*;
 use oauth2::{AuthorizationCode, CsrfToken};
-use serde::{de::Error, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
-use url::Url;
+
+use std::fmt::Debug;
+
+use crate::util::*;
 
 /// Parameters sent from client -> proxy server 
 /// on initial generate OAuth2 query.
@@ -26,8 +28,10 @@ pub struct FinParams {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct FinResponse {
+pub struct FinResponse<R>
+    // where R: Debug + DeserializeOwned + Serialize
+{
 	#[serde(with="serde_secret_newtype", rename="state")]
 	pub csrf_token: CsrfToken,
-	pub new_secret: String,
+	pub response: R,
 }

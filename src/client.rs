@@ -1,11 +1,19 @@
-#![feature(uniform_paths)]
+//! Functionality for authenticating a client
+//!
+//! The `Client` has 3 main responsibilities:
+//!
+//!  - Query the `Proxy` for an authz URL.
+//!  - Prompt the `User` to visit the URL (either automtically opening the URL,
+//!    or through copy+paste).
+//!  - Wait for the `User` to be redirected back to the locally running
+//!    HTTP server.
 
-use abscissa::{impl_global_config, logging, CanonicalPathBuf, GlobalConfig};
 use actix_web::{http, server, App, HttpResponse, Query, State};
 use lazy_static::lazy_static;
 use log::*;
 use oauth2::CsrfToken;
 use oauth2::prelude::*;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::Deserialize;
 use std::ops::Deref;
 use std::sync::mpsc;
@@ -13,35 +21,30 @@ use std::sync::Arc;
 use std::thread;
 use url::Url;
 
-use olaf2::*;
+use crate::msgs::*;
+use crate::util::*;
 
-/// Configuration data to parse from TOML
-#[derive(Clone, Deserialize, Debug)]
-pub struct Config {
-    /// Endpoint for the server.
-    #[serde(with="url_serde")]
-    pub server_url: Url,
-}
-
-impl_global_config!(Config, SERVER_CONFIG);
-
-fn main() {
-    let config = logging::LoggingConfig::default();
-    logging::init(config).expect("failed to start logging");
-
-    Config::set_global(Config { server_url: Url::parse("http://localhost:8081").unwrap() });
-
+/// Run the authn process for proxy running at `proxy_url`.
+pub fn authenticate<R>(proxy_url: &str) -> String
+    where R: 'static + DeserializeOwned + Serialize
+{
     let token = CsrfToken::new_random();
     let (tx, rx) = mpsc::sync_channel(1);
     let tx = Arc::new(tx);
-    let port = run_oauth_listener(Arc::new(token.clone()), tx);
+    let port = run_oauth_listener::<R>(Arc::new(token.clone()), tx);
     let params = GenParams {
         client_port: port,
         csrf_token: token,
     };
-    let url = get_authorization_url(&params);
-    info!("Recovered URL: {}", url);
-    if open::that(url.to_string()).is_err() {
+    let url = get_authorization_url(&params, Url::parse(proxy_url).unwrap());
+    // info!("Recovered URL: {}", url);
+    println!("Attempting to open URL in browser");
+    let failed = match open::that(url.to_string()) {
+            Ok(s) if s.success() => false,
+            Ok(_) => { println!("Failed to find browser to open URL."); true },
+            Err(_) => { println!("Couldn't find native 'open` command"); true },
+    };
+    if failed {
         println!(
             "Open this URL in your browser:\n{}\n",
             url.to_string()
@@ -50,20 +53,23 @@ fn main() {
 
     let secret = rx.recv().unwrap();
     info!("New secret received: {}", secret);
-
+    secret
 }
 
 #[derive(Clone, Debug)]
 struct AppState {
+    // server_url: String,
     nonce: Arc<CsrfToken>,
     tx: Arc<mpsc::SyncSender<String>>,
 }
 
-pub fn run_oauth_listener(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> u16 {
+fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> u16
+    where R: 'static + DeserializeOwned + Serialize
+{
     let state = AppState { nonce, tx };
 
     let server = server::new(move || {
-        App::with_state(state.clone()).resource("/", |r| r.with(handle_response))
+        App::with_state(state.clone()).resource("/", |r| r.with(handle_response::<R>))
     })
     .workers(1)
     .bind("127.0.0.1:0")
@@ -79,15 +85,18 @@ pub fn run_oauth_listener(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String
     port
 }
 
-fn handle_response((info, state): (Query<FinResponse>, State<AppState>)) -> HttpResponse {
-    info!("Info: {:#?}", info);
-    let FinResponse { csrf_token, new_secret} = info.into_inner();
+fn handle_response<R>((info, state): (Query<FinResponse<R>>, State<AppState>)) -> HttpResponse
+    where R: 'static + DeserializeOwned + Serialize
+{
+    // info!("Info: {:#?}", info);
+    let FinResponse { csrf_token, response} = info.into_inner();
     info!("Received nonce: {}, Expected nonce: {}", csrf_token.secret(), state.nonce.secret());
-    info!("new_secret: {}", new_secret);
+    // info!("new_secret: {}", new_secret);
     if &csrf_token == state.nonce.deref() {
-        state.tx.send(new_secret).unwrap();
+        info!("CSRF tokens match");
+        state.tx.send(serde_json::to_string(&response).unwrap()).unwrap();
     } else {
-        state.tx.send("".to_string()).unwrap();
+        state.tx.send("Incorrect tokens".to_string()).unwrap();
     }
     HttpResponse::Ok()
         .connection_type(http::ConnectionType::Close) // <- Close connection
@@ -95,8 +104,8 @@ fn handle_response((info, state): (Query<FinResponse>, State<AppState>)) -> Http
         .finish()
 }
 
-pub fn get_authorization_url(params: &GenParams) -> String {
-    let server_url = &Config::get_global().server_url;
+fn get_authorization_url(params: &GenParams, server_url: Url) -> String {
+    // let server_url = &Config::get_global().server_url;
     let client = reqwest::Client::new();
     let resp = client.post(&format!("{}oauth-cli/start", server_url))
                      .json(params)

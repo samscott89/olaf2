@@ -1,6 +1,5 @@
 use oauth2::prelude::*;
-use serde::{de::Error, Deserialize, Serialize};
-use serde_derive::{Deserialize, Serialize};
+use serde::Deserialize;
 use url::Url;
 
 use std::ops::Deref;
