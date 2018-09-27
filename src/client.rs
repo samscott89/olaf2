@@ -57,29 +57,36 @@ pub fn authenticate<R>(proxy_url: &str) -> String
         );
     }
 
+    let current_system = actix::System::current();
+    let arbiter = current_system.arbiter().clone();
     let arc_secret = Arc::new(Mutex::new(String::new()));
     let arc_secret2 = arc_secret.clone();
     thread::spawn(move || {
-        let secret = rx.recv().unwrap();
+        println!("Waiting to receive secret...");
+        let (secret, sys) = rx.recv().unwrap();
+        actix::System::set_current(sys.clone());
         info!("New secret received: {}", secret);
         *arc_secret2.lock().unwrap() = secret;
-        server.do_send(actix_web::server::StopServer { graceful: true });
+        server.do_send(actix_web::server::StopServer { graceful: false });
+        sys.stop();
     });
-
     sys.run();  // <- Run actix system, this method starts all async processes
+
     let secret = arc_secret.lock().unwrap();
     // arc_secret.lock().unwrap().clone().to_string()
     secret.clone()
 }
 
+type ChannelMsg = (String, actix::System);
+
 #[derive(Clone, Debug)]
 struct AppState {
     // server_url: String,
     nonce: Arc<CsrfToken>,
-    tx: Arc<mpsc::SyncSender<String>>,
+    tx: Arc<mpsc::SyncSender<ChannelMsg>>,
 }
 
-fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> (u16, Addr<Server>)
+fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<ChannelMsg>>) -> (u16, Addr<Server>)
     where R: 'static + DeserializeOwned + Serialize
 {
     let state = AppState { nonce, tx };
@@ -104,9 +111,9 @@ fn handle_response<R>((info, state): (Query<FinResponse<R>>, State<AppState>)) -
     // info!("new_secret: {}", new_secret);
     if &csrf_token == state.nonce.deref() {
         info!("CSRF tokens match");
-        state.tx.send(serde_json::to_string(&response).unwrap()).unwrap();
+        state.tx.send((serde_json::to_string(&response).unwrap(), actix::System::current())).unwrap();
     } else {
-        state.tx.send("Incorrect tokens".to_string()).unwrap();
+        state.tx.send(("Incorrect tokens".to_string(), actix::System::current())).unwrap();
     }
 
     if let Some(welcome) = welcome_redirect {
