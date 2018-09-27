@@ -34,6 +34,7 @@ use oauth2::{AccessToken, AuthUrl, ClientId, ClientSecret, RedirectUrl,
 use serde::{Deserialize, de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use url::Url;
+use url_serde::Serde;
 
 use std::fmt::Debug;
 use std::marker::{PhantomData, Send};
@@ -70,7 +71,7 @@ pub struct Config {
     #[serde(with="serde_newtype_vec")]
     pub scopes: Vec<Scope>,
 
-    /// HTML webpage template to serve when the client finishes 
+    /// Page to serve when the client finishes 
     #[serde(with="url_serde")]
     pub welcome_redirect: Url,
 }
@@ -94,6 +95,7 @@ pub fn run<H, R>(config: Config, session_handler: H)
 {
     let _sys = actix::System::new("olaf2-server");
     let port = config.port;
+    let welcome = config.welcome_redirect.clone();
     let client_addr = OAuthExecutor::from_config(config);
     let session_handler = Arbiter::start(move |_| session_handler);
     server::new(move || {
@@ -102,6 +104,7 @@ pub fn run<H, R>(config: Config, session_handler: H)
                 oauth_client: client_addr.clone(),
                 session_handler: session_handler.clone(),
                 marker: PhantomData,
+                welcome_redirect: welcome.clone(),
             })
             .middleware(Logger::default())
             .resource("/oauth-cli/start", 
@@ -195,15 +198,18 @@ fn oauth_fin<H, R>((info, state): (Query<FinParams>, State<AppState<H, R>>)) -> 
                             let resp = FinResponse {
                                 csrf_token: nonce,
                                 response: val,
+                                welcome_redirect: Some(Serde(state.welcome_redirect.clone())),
                             };
                             let redirect_url = Url::parse(
                                 &format!("http://localhost:{}?{}",
                                     port,
-                                    serde_qs::to_string(&resp).unwrap()
+                                    serde_qs::to_string(&resp).unwrap(),
                                 )   
                             ).unwrap();
 
-                            get_redirect_page(redirect_url)
+                            let html = super::get_redirect_page(&redirect_url, &state.welcome_redirect);
+                            HttpResponse::Ok()
+                                .body(html)
                         },
                         Err(_) => HttpResponse::InternalServerError().finish(),
                     }
@@ -213,15 +219,6 @@ fn oauth_fin<H, R>((info, state): (Query<FinParams>, State<AppState<H, R>>)) -> 
         }
     }).responder()
 }
-
-fn get_redirect_page(redirect_url: Url) -> HttpResponse {
-    let html = include_str!("redirect_template.html");
-    let html = html.replace("{{redirect_url}}", &redirect_url.to_string());
-
-    HttpResponse::Ok()
-        .body(html)
-}
-
 
 ///// Annoying stuff
 
@@ -267,6 +264,7 @@ struct AppState<H, R>
     pub oauth_client: Addr<OAuthExecutor>,
     pub session_handler: Addr<H>,
     pub marker: PhantomData<R>,
+    pub welcome_redirect: Url,
 }
 
 impl OAuthExecutor {

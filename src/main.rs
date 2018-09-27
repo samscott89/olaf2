@@ -25,7 +25,7 @@ fn main() {
 fn server_main() {
 	let toml = include_str!("proxy_config.toml");
 	let config: proxy::Config = toml::from_str(toml).unwrap();
-	proxy::run(config, |token| {
+	proxy::run_with(config, |token| {
 		let secret = token.secret().to_string();
 		println!("Received token: {}", &secret);
 		Ok(secret)

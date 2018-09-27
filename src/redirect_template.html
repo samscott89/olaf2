@@ -16,15 +16,15 @@ font-weight: bold;
 <script type="text/javascript">
 	var xmlHttp = new XMLHttpRequest();
 	xmlHttp.onreadystatechange = function() { 
-	    if (xmlHttp.readyState == 4 && xmlHttp.status == 200)
-			window.location.replace('{{redirect_url}}');
+	    if (xmlHttp.readyState == 4)
+			window.location.replace('{{welcome_url}}');
 	}
 	xmlHttp.open("GET", "{{redirect_url}}", true); // true for asynchronous 
 	xmlHttp.send(null);
 </script>
 <noscript>
 Javascript is disabled. You will be redirected to a blank page to finish authentication.
-<meta HTTP-EQUIV="REFRESH" content="10; url={{redirect_url}}"> 
+<meta HTTP-EQUIV="REFRESH" content="10; url={{combined_url}}"> 
  </noscript>
 </p>
 </body>

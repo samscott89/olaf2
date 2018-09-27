@@ -59,7 +59,7 @@
 //! // the lazy way to load the config...
 //! let toml = include_str!("proxy_config.toml");
 //! let config: proxy::Config = toml::from_str(toml).unwrap();
-//! proxy::run(config, |token| {
+//! proxy::run_with(config, |token| {
 //!  	// This simple function prints the access token and
 //!		// returns it to the client
 //! 	let secret = token.secret().to_string();
@@ -155,3 +155,16 @@ pub mod proxy;
 pub mod server;
 mod msgs;
 mod util;
+
+use url::Url;
+
+pub(crate) fn get_redirect_page(redirect_url: &Url, welcome_redirect: &Url) -> String {
+    let html = include_str!("redirect_template.html");
+    let mut combined_url = redirect_url.clone();
+    combined_url.query_pairs_mut().append_pair("welcome_redirect", &welcome_redirect.to_string());
+    let html = html.replace("{{redirect_url}}", &redirect_url.to_string());
+    let html = html.replace("{{welcome_url}}", &welcome_redirect.to_string());
+    let html = html.replace("{{combined_url}}", &combined_url.to_string());
+
+    html
+}

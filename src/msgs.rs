@@ -1,6 +1,8 @@
 use oauth2::{AuthorizationCode, CsrfToken};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
+use url::Url;
+use url_serde::Serde;
 
 use std::fmt::Debug;
 
@@ -34,4 +36,5 @@ pub struct FinResponse<R>
 	#[serde(with="serde_secret_newtype", rename="state")]
 	pub csrf_token: CsrfToken,
 	pub response: R,
+    pub welcome_redirect: Option<Serde<Url>>,
 }

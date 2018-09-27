@@ -8,7 +8,12 @@
 //!  - Wait for the `User` to be redirected back to the locally running
 //!    HTTP server.
 
-use actix_web::{http, server, App, HttpResponse, Query, State};
+use actix::Addr;
+use actix_web::{
+    http, 
+    server::{self, Server},
+    App, HttpResponse, Query, State
+};
 use lazy_static::lazy_static;
 use log::*;
 use oauth2::CsrfToken;
@@ -17,7 +22,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::Deserialize;
 use std::ops::Deref;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use url::Url;
 
@@ -28,10 +33,11 @@ use crate::util::*;
 pub fn authenticate<R>(proxy_url: &str) -> String
     where R: 'static + DeserializeOwned + Serialize
 {
+    let sys = actix::System::new("oauth_cli");  // <- create Actix system
     let token = CsrfToken::new_random();
     let (tx, rx) = mpsc::sync_channel(1);
     let tx = Arc::new(tx);
-    let port = run_oauth_listener::<R>(Arc::new(token.clone()), tx);
+    let (port, server) = run_oauth_listener::<R>(Arc::new(token.clone()), tx);
     let params = GenParams {
         client_port: port,
         csrf_token: token,
@@ -51,9 +57,19 @@ pub fn authenticate<R>(proxy_url: &str) -> String
         );
     }
 
-    let secret = rx.recv().unwrap();
-    info!("New secret received: {}", secret);
-    secret
+    let arc_secret = Arc::new(Mutex::new(String::new()));
+    let arc_secret2 = arc_secret.clone();
+    thread::spawn(move || {
+        let secret = rx.recv().unwrap();
+        info!("New secret received: {}", secret);
+        *arc_secret2.lock().unwrap() = secret;
+        server.do_send(actix_web::server::StopServer { graceful: true });
+    });
+
+    sys.run();  // <- Run actix system, this method starts all async processes
+    let secret = arc_secret.lock().unwrap();
+    // arc_secret.lock().unwrap().clone().to_string()
+    secret.clone()
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +79,7 @@ struct AppState {
     tx: Arc<mpsc::SyncSender<String>>,
 }
 
-fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> u16
+fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>>) -> (u16, Addr<Server>)
     where R: 'static + DeserializeOwned + Serialize
 {
     let state = AppState { nonce, tx };
@@ -76,20 +92,14 @@ fn run_oauth_listener<R>(nonce: Arc<CsrfToken>, tx: Arc<mpsc::SyncSender<String>
     .expect("Can not bind to 127.0.0.1:0");
     let port = server.addrs().get(0).unwrap().port();
 
-    thread::spawn(move || {
-        let sys = actix::System::new("oauth_cli");  // <- create Actix system
-        server.start();
-        sys.run();  // <- Run actix system, this method starts all async processes
-    });
-
-    port
+    (port, server.start())
 }
 
 fn handle_response<R>((info, state): (Query<FinResponse<R>>, State<AppState>)) -> HttpResponse
     where R: 'static + DeserializeOwned + Serialize
 {
     // info!("Info: {:#?}", info);
-    let FinResponse { csrf_token, response} = info.into_inner();
+    let FinResponse { csrf_token, response, welcome_redirect } = info.into_inner();
     info!("Received nonce: {}, Expected nonce: {}", csrf_token.secret(), state.nonce.secret());
     // info!("new_secret: {}", new_secret);
     if &csrf_token == state.nonce.deref() {
@@ -98,10 +108,17 @@ fn handle_response<R>((info, state): (Query<FinResponse<R>>, State<AppState>)) -
     } else {
         state.tx.send("Incorrect tokens".to_string()).unwrap();
     }
-    HttpResponse::Ok()
-        .connection_type(http::ConnectionType::Close) // <- Close connection
-        .force_close()                                // <- Alternative method
-        .finish()
+
+    if let Some(welcome) = welcome_redirect {
+        let html = super::get_redirect_page(welcome.deref(), welcome.deref());
+        HttpResponse::Ok()
+            .connection_type(http::ConnectionType::Close)
+            .body(html)
+    } else {
+        HttpResponse::Ok()
+            .connection_type(http::ConnectionType::Close)
+            .finish()
+    }
 }
 
 fn get_authorization_url(params: &GenParams, server_url: Url) -> String {
